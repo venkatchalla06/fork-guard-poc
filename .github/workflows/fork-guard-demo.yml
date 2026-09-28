@@ -1,0 +1,66 @@
+# Self-contained demonstration of the missing fork-origin guard reported in
+# issuetracker 566062074. Runs ONLY on GitHub-hosted ubuntu runners, uses NO secrets,
+# and never touches Google infrastructure. It reproduces the exact conditional logic
+# that jax-ml/jax, tensorflow/tensorflow and openxla/xla rely on as access controls.
+name: fork-guard-demo
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+permissions:
+  contents: read
+jobs:
+  context-dump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dump the values used as access controls
+        run: |
+          echo "event_name=${{ github.event_name }} action=${{ github.event.action }}"
+          echo "github.repository=${{ github.repository }}"
+          echo "github.repository_owner=${{ github.repository_owner }}"
+          echo "event.repository.fork=${{ github.event.repository.fork }}"
+          echo "head.repo.full_name=${{ github.event.pull_request.head.repo.full_name }}"
+
+  # ---- The three conditions the ML-infra workflows use as guards ----
+  # On a fork PR these evaluate in the BASE repo, so they all RUN (i.e. they do NOT gate).
+  nonguard-repository:            # mirrors jax ci-build.yaml L35 / asan.yaml L62
+    needs: context-dump
+    if: github.repository == 'venkatchalla06/fork-guard-poc'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "NON-GUARD (github.repository==) RAN"
+
+  nonguard-owner:                 # mirrors jax ffi job L93
+    needs: context-dump
+    if: github.repository_owner == 'venkatchalla06'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "NON-GUARD (github.repository_owner==) RAN"
+
+  nonguard-fork-flag:
+    needs: context-dump
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "NON-GUARD (event.repository.fork==false) RAN"
+
+  # ---- The correct discriminator, absent from all four ML-infra workflows ----
+  # On a fork PR this SKIPS. This is the one-line fix.
+  correct-guard:
+    needs: context-dump
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "CORRECT GUARD RAN (reachable only from a same-repo PR)"
+
+  # ---- The money shot: exact jax/tf/xla pattern -> fork code executes ----
+  # Guarded ONLY by github.repository== (the jax pattern), then checks out the PR
+  # merge ref (default checkout, no explicit ref = what jax 'tests' job does) and runs
+  # a script that came from the PR. Whatever the fork wrote to poc/marker.sh runs here.
+  runs-pr-code-under-nonguard:
+    needs: context-dump
+    if: github.repository == 'venkatchalla06/fork-guard-poc'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4      # no ref => PR merge ref => includes fork's code
+      - name: Execute PR-controlled script (benign marker)
+        run: bash ./poc/marker.sh
